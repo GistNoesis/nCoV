@@ -1,0 +1,404 @@
+<html>
+
+<head>
+    <title>virus report simulation</title>
+</head>
+
+<body>
+
+    <script src="vue.js"></script>
+    <script src="plotly-latest.min.js"></script>
+
+    <div id="app">
+        <div id="controls">
+            First infection Date </br> 
+            Because  our simplistic model which doesn't model well the growth in the initial stages of an epidemy</br>
+             this is different than the real date of virus apparition (i.e. December 8 2019) :
+            <input type="date" v-model="initialDate"> </br>
+            Simulation length :
+            <input type="number" v-model="simulationLength" v-bind:min="minSimulationLength()"></br>
+            First Displayed date :
+            <input type="number" v-model="firstDisplayDate" min=0 v-bind:max="simulationLength"></br>
+            Infected growth rate :
+            <input type="number" step=0.001 v-model="infectivityRate" min=0></br>
+            Detection rate (Fraction of the infected confirmed, </br>doesn't affect the number of death, as we assume dead people would have seek help as their situation deteriorate):
+            <input type="number" step=0.01 v-model="detectionRate" min=0 max=1.0></br>
+            Lethality rate (The probability of dying once infected):
+            <input type="number" step=0.001 v-model="lethalityRate" min=0 max=1.0></br>
+            Death lag (Number of days between infection and death):
+            <input type="number" v-model="deathlag" step=0.1 min=0></br>
+            Recovery lag (Number of days until no longer infected):
+            <input type="number" v-model="recoverylag" step=0.1 min=0></br>
+            <button onclick="NonAlarmist()"> Assign Non alarmist parameters</button>
+            <button onclick="Middle()"> Assign Middle parameters</button>
+            <button onclick="Alarmist()"> Assign Alarmist parameters</button>
+            <button onclick="Optimize()"> Optimize parameters locally</button></br>
+            Current Fit score (Weighted Sum of Squares, Lower is better): <span id="scoreid"></span>
+        </div>
+    </div>
+    <div id="PlotlyTest" style="width: '800px'; height:'500px'">
+        <!-- Plotly chart will be drawn inside this DIV -->
+    </div>
+
+    <script>
+
+        //Data from https://docs.google.com/spreadsheets/d/1yZv9w9zRKwrGTaR-YzmAqMefw4wMlaXocejdxZaTs6w/edit?usp=sharing
+        //Pointed by https://gisanddata.maps.arcgis.com/apps/opsdashboard/index.html
+        var hubeiDates = [new Date("2020-01-23"),
+        new Date("2020-01-24"),
+        new Date("2020-01-25"),
+        new Date("2020-01-26"),
+        new Date("2020-01-27"),
+        new Date("2020-01-28"),
+        new Date("2020-01-29"),
+        new Date("2020-01-30"),
+        new Date("2020-01-31"),
+        ];
+
+        var hubeiCases = [444, 549, 1052, 1423, 2714, 3554, 4586, 5806,7153];
+        var hubeiDeath = [17, 24, 52, 76, 100, 125, 162, 204,249];
+        var hubeiRecovered = [28, 31, 42, 44, 47, 80, 90, 116,169];
+
+        var data = {};
+
+        var dataMiddle =
+        {
+            initialDate: '2020-01-03',
+            simulationLength: 30,
+            firstDisplayDate: 20,
+            infectivityRate: 0.416,
+            lethalityRate: 0.144,
+            deathlag: 9,
+            recoverylag: 12,
+            detectionRate: 0.7
+        };
+
+        var dataAlarmist =
+        {
+            initialDate: '2020-01-03',
+            simulationLength: 30,
+            firstDisplayDate: 20,
+            infectivityRate: 0.416,
+            lethalityRate: 0.511,
+            deathlag: 13,
+            recoverylag: 12,
+            detectionRate: 0.8
+        };
+        var dataNonAlarmist =
+        {
+            initialDate: '2020-01-03',
+            simulationLength: 30,
+            firstDisplayDate: 20,
+            infectivityRate: 0.396,
+            lethalityRate: 0.02,
+            deathlag: 2.6,
+            recoverylag: 14.6,
+            detectionRate: 1.0
+        };
+
+        function NonAlarmist() {
+            Object.assign(data, dataNonAlarmist);
+        }
+
+        function Alarmist() {
+            Object.assign(data, dataAlarmist);
+        }
+
+        function Middle() {
+            Object.assign(data, dataMiddle);
+        }
+
+        Object.assign(data, dataMiddle);
+
+        var watchList = {};
+        for (var k in data) {
+            watchList[k] = (val) => updatePlot();
+        }
+
+        function minSimulationLength()
+        {
+            var day0 = new Date(data.initialDate);
+            var lastDate = hubeiDates[ hubeiDates.length-1];
+            const diffTime = Math.abs(lastDate - day0);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            var nb = diffDays+1;
+            return nb;
+        }
+
+        var app = new Vue({
+            el: '#app',
+            data: data,
+            watch: watchList,
+            methods:{minSimulationLength: ()=>minSimulationLength()}
+        })
+
+
+        function GenerateCurves(ir, dr, dl, lr, rl, nb) {
+            var infected = [];
+            var detected = [];
+            var deaths = [];
+            var recovered = [];
+            var curInf = 1;
+            var r = (1.0 + ir);
+
+            for (var i = 0; i < nb; i++) {
+                infected.push(curInf);
+                var indmaxdl = Math.ceil(i - dl);
+                var wdl = indmaxdl - (i - dl);
+
+                var indmaxrl = Math.ceil(i - rl);
+                var wrl = indmaxrl - (i - rl);
+
+                //we detect death from the whole pool not only those that were previously detected
+                //As we assume that sick people would have seek help before dying as their situation degrade
+                var curDeath = indmaxdl - 1 >= 0 ? ((1 - wdl) * infected[indmaxdl] + wdl * infected[indmaxdl - 1]) * lr : 0; 
+
+                var curRecov = indmaxrl - 1 >= 0 ? ((1 - wrl) * infected[indmaxrl] + wrl * infected[indmaxrl - 1]) * (1 - lr) : 0;
+                var prevDeath = i > 0 ? deaths[deaths.length - 1] : 0;
+                var prevRecov = i > 0 ? recovered[recovered.length - 1] : 0;
+                deaths.push(prevDeath + curDeath);
+
+                infected[infected.length - 1] -= curDeath;
+                infected[infected.length - 1] -= curRecov;
+                recovered.push(curRecov + dr * curRecov);//we don't detect recovery from the whole pool, only those that were previously detected
+
+
+                infected[infected.length - 1] = Math.max(infected[infected.length - 1], 0.0)
+
+                detected.push(infected[infected.length - 1] * dr);
+
+                curInf = infected[infected.length - 1] * r;
+            }
+            return [infected, detected, deaths, recovered];
+        }
+
+
+
+
+
+        function rebuildGraphData() {
+            var ir = parseFloat(data.infectivityRate);
+            var dr = parseFloat(data.detectionRate);
+            var nb = parseInt(data.simulationLength);
+
+            var dl = parseFloat(data.deathlag);
+            var lr = parseFloat(data.lethalityRate);
+            var rl = parseFloat(data.recoverylag);
+            var fd = parseInt(data.firstDisplayDate);
+
+            var dates = [];
+            var d0Str = data.initialDate;
+            for (var i = 0; i < nb; i++) {
+                dates.push(new Date(new Date(d0Str).setDate(new Date(d0Str).getDate() + i)));
+            }
+
+            curves = GenerateCurves(ir, dr, dl, lr, rl,nb);
+
+            for (var i = 0; i < 4; i++) {
+                graph[i].x = dates.slice(fd);
+                graph[i].y = curves[i].slice(fd);
+            }
+
+            var score = Score([ir, dr, dl, lr, rl]);
+            document.getElementById("scoreid").innerText = score;
+            console.log("Score : " + score);
+
+        }
+
+
+        
+
+
+        function Score(param) {
+            var day0 = new Date(data.initialDate);
+
+            var lastDate = hubeiDates[ hubeiDates.length-1];
+            const diffTime = Math.abs(lastDate - day0);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            var nb = diffDays+1;
+
+            var curves = GenerateCurves(...param,nb);
+
+            var score = 0.0;
+            //Some weights to indicate our relative confidence in the quality of the data 
+            //and help compensate for the fact that deaths and recovery are an order of magnitude smaller than the number of cases
+            var w = [1.0,100,20.0];
+            var sw = 0;
+            for( var i = 0 ; i < w.length ; i++)
+            {
+                sw += w[i];
+            }
+
+            for (var i = 0; i < hubeiDates.length; i++) {
+                const diffTime = Math.abs(hubeiDates[i] - day0);
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                var ind = diffDays;
+                diffCases = hubeiCases[i] - curves[1][ind];
+                diffDeath = hubeiDeath[i] - curves[2][ind];
+                diffRecovered = hubeiRecovered[i] - curves[3][ind];
+                score += w[0]*diffCases * diffCases + w[1]*diffDeath * diffDeath + w[2]*diffRecovered * diffRecovered;
+            }
+            return score / (sw * hubeiDates.length);
+        }
+
+        
+
+        function currentFitScore()
+        {
+            var ir = parseFloat(data.infectivityRate);
+            var dr = parseFloat(data.detectionRate);
+            var dl = parseFloat(data.deathlag);
+            var lr = parseFloat(data.lethalityRate);
+            var rl = parseFloat(data.recoverylag);
+
+            var params = [ir, dr, dl, lr, rl];
+            return Score(params);
+        }
+
+        function gradient(param, eps = 1e-3) {
+            //We do some finite difference method
+            //Ideally we would have used backward differentiation but this is js.
+            var grad = new Array(param.length);
+            var v0 = Score(param);
+            for (var i = 0; i < param.length; i++) {
+                param[i] += eps;
+                var v = Score(param);
+                grad[i] = (v - v0) / eps;
+                param[i] -= eps;
+            }
+            return grad;
+        }
+
+        function clamp(x, min, max) {
+            if (x < min) {
+                return min;
+            }
+            if (x > max) {
+                return max;
+            }
+            return x;
+        }
+
+        function RandomizeParameters() {
+            data.infectivityRate = Math.round(Math.random() * 1000) / 1000.0;
+            data.detectionRate = Math.round(Math.random() * 100) / 100.0;
+            data.deathlag = Math.round(Math.random() * 15 * 10) / 10.0;
+            data.lethalityRate = Math.round(Math.random() * 1000) / 1000.0;
+            data.recoverylag = Math.round(Math.random() * 15 * 10) / 10.0;
+        }
+
+
+        function Optimize() {
+            var ir = parseFloat(data.infectivityRate);
+            var dr = parseFloat(data.detectionRate);
+            var dl = parseFloat(data.deathlag);
+            var lr = parseFloat(data.lethalityRate);
+            var rl = parseFloat(data.recoverylag);
+
+            var params = [ir, dr, dl, lr, rl];
+            var stepsizes = [1e-3, 1e-2, 1e-1, 1e-3, 1e-1];
+            var boundsMin = [0.0, 0.0, 0.0, 0.0, 1.0];
+            var boundsMax = [1.0, 1.0, 30.0, 1.0, 30.0];
+
+            //Clipped gradient descent
+            for (var k = 0; k < 50; k++) {
+                var grad = gradient(params);
+
+                for (var i = 0; i < params.length; i++) {
+                    params[i] -= clamp( grad[i],-stepsizes[i],stepsizes[i]);
+                    params[i] = clamp(params[i],boundsMin[i],boundsMax[i]);
+                }
+            }
+
+
+            console.log("optim result : " + params);
+            console.log("Score " + Score(params));
+
+            data.infectivityRate = Math.round(params[0] * 1000) / 1000.0;
+            data.detectionRate = Math.round(params[1] * 100) / 100.0;
+            data.deathlag = Math.round(params[2] * 10) / 10.0;
+            data.lethalityRate = Math.round(params[3] * 1000) / 1000.0;
+            data.recoverylag = Math.round(params[4] * 10) / 10.0;
+        }
+
+
+        var graph = [{
+            name: 'Predicted Infected (Unobservable)',
+            type: 'line',
+            visible: 'legendonly'
+        },
+        {
+            name: 'Predicted Confirmed',
+            type: 'line'
+        },
+        {
+            name: 'Predicted Death',
+            type: 'line'
+        },
+        {
+            name: 'Predicted Recovered',
+            type: 'line'
+        },
+
+        {
+            x: hubeiDates,
+            y: hubeiCases,
+            name: 'Hubei Confirmed',
+            type: 'line'
+        },
+        {
+            x: hubeiDates,
+            y: hubeiDeath,
+            name: 'Hubei Deaths',
+            type: 'line'
+        },
+        {
+            x: hubeiDates,
+            y: hubeiRecovered,
+            name: 'Hubei Recovered',
+            type: 'line'
+        }
+
+        ];
+
+        rebuildGraphData();
+        Plotly.newPlot('PlotlyTest', graph);
+
+
+        function updatePlot() {
+            rebuildGraphData();
+
+            Plotly.redraw('PlotlyTest');
+
+        }
+
+    </script>
+
+    <div>
+        <h1>Disclaimer : </h1><br />
+        This is a toy. It probably contains bugs. I am not an epidemiologist.
+        <h1>Explanation : </h1><br />
+        This is a simplistic deterministic model to show the evolution of the confirmed, death and recovery numbers
+        depending on the virus parameters. <br />
+        Warning : This model is only valid to depict the numbers of a single geographical region.<br />
+        For multiple regions the model would need to be something like the sum of this model using local parameters and offsetted by the initial
+        contamination date<br />
+        Here we have chosen the Hubei region (region with most cases) with data from
+        https://gisanddata.maps.arcgis.com/apps/opsdashboard/index.html which uses WHO numbers <br /><br />
+
+        You can chose some parameters, and the curves will update on the fly, you can click Optimize parameters locally to find a local optima<br />
+        You can hide/show some curves to inspect for quality of fit by clicking on their respective legend, <br />
+        You can also hoover the graph to see values. Using the keyboard to navigate with tabs and arrows you can inspect as you update parameters<br />
+        If you play with it a little you will observe that whatever the parameters you choose, you can use the degree of freedom in the remaining parameters to obtain an OKish fit.<br /><br />
+        The <b>key lesson</b> to retain is that with the available data to the public, <b>quite a large range of parameters can
+        make the curves fit </b> . This mean that we can't infer the lethality rate reliably from these curve only so <b>we shouldn't try to read too much from them !</b><br />
+        <h1>The model : </h1> <br />
+        Constant exponential growth of the infected, which are immediately contagious and stay so while they are alive and not recovered, whether detected or not <br />
+        Once you become infected you, depending on the lethality rate, either will be dead exactly "death lag days"
+        after infection or
+        be recovered "recovery lag" days after infection.
+    </div>
+
+</body>
+
+</html>
